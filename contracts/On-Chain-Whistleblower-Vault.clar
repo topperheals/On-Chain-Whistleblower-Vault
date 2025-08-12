@@ -30,6 +30,16 @@
     { voted: bool }
 )
 
+(define-map member-reputation
+    { member: principal }
+    {
+        total-votes: uint,
+        correct-votes: uint,
+        reputation-score: uint,
+        last-updated: uint,
+    }
+)
+
 (define-public (initialize-contract (admin principal))
     (begin
         (asserts! (is-eq tx-sender (var-get dao-admin)) ERR-NOT-AUTHORIZED)
@@ -45,6 +55,12 @@
             (unwrap! (as-max-len? (append (var-get council-members) member) u50)
                 ERR-NOT-AUTHORIZED
             ))
+        (map-set member-reputation { member: member } {
+            total-votes: u0,
+            correct-votes: u0,
+            reputation-score: u100,
+            last-updated: stacks-block-height,
+        })
         (ok true)
     )
 )
@@ -123,6 +139,7 @@
         )
         (asserts! (is-eq tx-sender (var-get dao-admin)) ERR-NOT-AUTHORIZED)
         (asserts! (is-eq (get status report) "pending") ERR-ALREADY-VERIFIED)
+        (unwrap-panic (update-council-reputations report-id approve))
         (if approve
             (begin
                 (match (get reporter report)
@@ -167,4 +184,58 @@
         report-id: report-id,
         council-member: member,
     })
+)
+
+(define-private (update-council-reputations (report-id uint) (final-decision bool))
+    (begin
+        (map update-member-reputation-helper
+            (var-get council-members)
+        )
+        (ok true)
+    )
+)
+
+(define-private (update-member-reputation-helper (member principal))
+    (let (
+            (vote-data (map-get? council-votes {
+                report-id: (var-get total-reports),
+                council-member: member,
+            }))
+            (current-reputation (default-to
+                { total-votes: u0, correct-votes: u0, reputation-score: u100, last-updated: u0 }
+                (map-get? member-reputation { member: member })
+            ))
+        )
+        (if (is-some vote-data)
+            (map-set member-reputation { member: member }
+                (merge current-reputation {
+                    total-votes: (+ (get total-votes current-reputation) u1),
+                    correct-votes: (+ (get correct-votes current-reputation) u1),
+                    reputation-score: (if (< (+ (get reputation-score current-reputation) u10) u1000)
+                        (+ (get reputation-score current-reputation) u10)
+                        u1000
+                    ),
+                    last-updated: stacks-block-height,
+                })
+            )
+            (map-set member-reputation { member: member }
+                (merge current-reputation {
+                    reputation-score: (if (> (get reputation-score current-reputation) u10)
+                        (- (get reputation-score current-reputation) u5)
+                        u0
+                    ),
+                    last-updated: stacks-block-height,
+                })
+            )
+        )
+        member
+    )
+)
+
+(define-read-only (get-member-reputation (member principal))
+    (map-get? member-reputation { member: member })
+)
+
+(define-read-only (get-top-reputation-members)
+    (var-get council-members)
 )
