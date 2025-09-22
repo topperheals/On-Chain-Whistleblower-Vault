@@ -3,12 +3,15 @@
 (define-constant ERR-REPORT-NOT-FOUND (err u102))
 (define-constant ERR-ALREADY-VERIFIED (err u103))
 (define-constant ERR-INVALID-STATUS (err u104))
+(define-constant ERR-EVIDENCE-NOT-FOUND (err u105))
+(define-constant ERR-INVALID-EVIDENCE (err u106))
 (define-constant MINIMUM-STAKE u1000000)
 
 (define-data-var dao-admin principal tx-sender)
 (define-data-var total-reports uint u0)
 (define-data-var council-members (list 50 principal) (list))
 (define-data-var member-to-remove principal tx-sender)
+(define-data-var total-evidence uint u0)
 
 (define-map reports
     { report-id: uint }
@@ -38,6 +41,24 @@
         reputation-score: uint,
         last-updated: uint,
     }
+)
+
+(define-map evidence-attachments
+    { evidence-id: uint }
+    {
+        report-id: uint,
+        evidence-hash: (buff 256),
+        evidence-type: (string-ascii 50),
+        submitter: (optional principal),
+        timestamp: uint,
+        file-size: uint,
+        description: (string-ascii 500),
+    }
+)
+
+(define-map report-evidence-count
+    { report-id: uint }
+    { count: uint }
 )
 
 (define-public (initialize-contract (admin principal))
@@ -124,6 +145,49 @@
         } { voted: true }
         )
         (ok true)
+    )
+)
+
+(define-public (attach-evidence
+        (report-id uint)
+        (evidence-hash (buff 256))
+        (evidence-type (string-ascii 50))
+        (file-size uint)
+        (description (string-ascii 500))
+        (anonymous bool)
+    )
+    (let (
+            (report (unwrap! (map-get? reports { report-id: report-id })
+                ERR-REPORT-NOT-FOUND
+            ))
+            (evidence-id (+ (var-get total-evidence) u1))
+            (submitter (if anonymous
+                none
+                (some tx-sender)
+            ))
+            (current-time stacks-block-height)
+            (current-count (default-to { count: u0 }
+                (map-get? report-evidence-count { report-id: report-id })
+            ))
+        )
+        (asserts! (not (is-eq (get status report) "rejected")) ERR-INVALID-STATUS)
+        (asserts! (> (len evidence-hash) u0) ERR-INVALID-EVIDENCE)
+        (asserts! (> file-size u0) ERR-INVALID-EVIDENCE)
+        (asserts! (> (len evidence-type) u0) ERR-INVALID-EVIDENCE)
+        (map-set evidence-attachments { evidence-id: evidence-id } {
+            report-id: report-id,
+            evidence-hash: evidence-hash,
+            evidence-type: evidence-type,
+            submitter: submitter,
+            timestamp: current-time,
+            file-size: file-size,
+            description: description,
+        })
+        (map-set report-evidence-count { report-id: report-id }
+            { count: (+ (get count current-count) u1) }
+        )
+        (var-set total-evidence evidence-id)
+        (ok evidence-id)
     )
 )
 
@@ -238,4 +302,28 @@
 
 (define-read-only (get-top-reputation-members)
     (var-get council-members)
+)
+
+(define-read-only (get-evidence (evidence-id uint))
+    (map-get? evidence-attachments { evidence-id: evidence-id })
+)
+
+(define-read-only (get-report-evidence-count (report-id uint))
+    (default-to { count: u0 }
+        (map-get? report-evidence-count { report-id: report-id })
+    )
+)
+
+(define-read-only (get-total-evidence)
+    (var-get total-evidence)
+)
+
+(define-read-only (verify-evidence-hash
+        (evidence-id uint)
+        (provided-hash (buff 256))
+    )
+    (match (map-get? evidence-attachments { evidence-id: evidence-id })
+        evidence (is-eq (get evidence-hash evidence) provided-hash)
+        false
+    )
 )
