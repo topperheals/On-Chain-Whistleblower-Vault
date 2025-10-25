@@ -7,11 +7,8 @@
 (define-constant ERR-INVALID-EVIDENCE (err u106))
 (define-constant ERR-INVALID-AMOUNT (err u107))
 (define-constant ERR-BOUNTY-CLAIMED (err u108))
-(define-constant ERR-NO-WITHDRAWAL (err u109))
-(define-constant ERR-WITHDRAWAL-LOCKED (err u110))
 (define-constant MINIMUM-STAKE u1000000)
 (define-constant MINIMUM-BOUNTY u100000)
-(define-constant WITHDRAWAL-DELAY u144)
 
 (define-data-var dao-admin principal tx-sender)
 (define-data-var total-reports uint u0)
@@ -83,18 +80,6 @@
         contributor: principal,
     }
     { amount: uint }
-)
-
-(define-map withdrawal-queue
-    {
-        report-id: uint,
-        requester: principal,
-    }
-    {
-        amount: uint,
-        unlock-height: uint,
-        withdrawn: bool,
-    }
 )
 
 (define-public (initialize-contract (admin principal))
@@ -253,25 +238,11 @@
                     })
                 )
             )
-            (begin
-                (map-set reports { report-id: report-id }
-                    (merge report {
-                        status: "rejected",
-                        verification-time: (some current-time),
-                    })
-                )
-                (match (get reporter report)
-                    reporter
-                    (map-set withdrawal-queue {
-                        report-id: report-id,
-                        requester: reporter,
-                    } {
-                        amount: (get stake-amount report),
-                        unlock-height: (+ current-time WITHDRAWAL-DELAY),
-                        withdrawn: false,
-                    })
-                    true
-                )
+            (map-set reports { report-id: report-id }
+                (merge report {
+                    status: "rejected",
+                    verification-time: (some current-time),
+                })
             )
         )
         (ok true)
@@ -466,50 +437,4 @@
         report-id: report-id,
         contributor: contributor,
     })
-)
-
-(define-public (withdraw-rejected-stake (report-id uint))
-    (let (
-            (withdrawal (unwrap! (map-get? withdrawal-queue {
-                report-id: report-id,
-                requester: tx-sender,
-            }) ERR-NO-WITHDRAWAL))
-            (current-height stacks-block-height)
-        )
-        (asserts! (not (get withdrawn withdrawal)) ERR-NO-WITHDRAWAL)
-        (asserts! (>= current-height (get unlock-height withdrawal)) ERR-WITHDRAWAL-LOCKED)
-        (try! (as-contract (stx-transfer? (get amount withdrawal) tx-sender tx-sender)))
-        (map-set withdrawal-queue {
-            report-id: report-id,
-            requester: tx-sender,
-        } (merge withdrawal { withdrawn: true }))
-        (ok (get amount withdrawal))
-    )
-)
-
-(define-read-only (get-withdrawal-status
-        (report-id uint)
-        (requester principal)
-    )
-    (map-get? withdrawal-queue {
-        report-id: report-id,
-        requester: requester,
-    })
-)
-
-(define-read-only (can-withdraw-now
-        (report-id uint)
-        (requester principal)
-    )
-    (match (map-get? withdrawal-queue {
-        report-id: report-id,
-        requester: requester,
-    })
-        withdrawal
-        (and
-            (not (get withdrawn withdrawal))
-            (>= stacks-block-height (get unlock-height withdrawal))
-        )
-        false
-    )
 )
