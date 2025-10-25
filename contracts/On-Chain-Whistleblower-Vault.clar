@@ -5,7 +5,10 @@
 (define-constant ERR-INVALID-STATUS (err u104))
 (define-constant ERR-EVIDENCE-NOT-FOUND (err u105))
 (define-constant ERR-INVALID-EVIDENCE (err u106))
+(define-constant ERR-INVALID-AMOUNT (err u107))
+(define-constant ERR-BOUNTY-CLAIMED (err u108))
 (define-constant MINIMUM-STAKE u1000000)
+(define-constant MINIMUM-BOUNTY u100000)
 
 (define-data-var dao-admin principal tx-sender)
 (define-data-var total-reports uint u0)
@@ -59,6 +62,24 @@
 (define-map report-evidence-count
     { report-id: uint }
     { count: uint }
+)
+
+(define-map report-bounties
+    { report-id: uint }
+    {
+        total-amount: uint,
+        contributors-count: uint,
+        claimed: bool,
+        created-at: uint,
+    }
+)
+
+(define-map bounty-contributions
+    {
+        report-id: uint,
+        contributor: principal,
+    }
+    { amount: uint }
 )
 
 (define-public (initialize-contract (admin principal))
@@ -326,4 +347,94 @@
         evidence (is-eq (get evidence-hash evidence) provided-hash)
         false
     )
+)
+
+(define-public (create-bounty
+        (report-id uint)
+        (amount uint)
+    )
+    (let (
+            (report (unwrap! (map-get? reports { report-id: report-id })
+                ERR-REPORT-NOT-FOUND
+            ))
+            (existing-bounty (map-get? report-bounties { report-id: report-id }))
+            (current-time stacks-block-height)
+        )
+        (asserts! (>= amount MINIMUM-BOUNTY) ERR-INVALID-AMOUNT)
+        (asserts! (is-eq (get status report) "pending") ERR-INVALID-STATUS)
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+        (match existing-bounty
+            bounty
+            (begin
+                (map-set report-bounties { report-id: report-id }
+                    (merge bounty {
+                        total-amount: (+ (get total-amount bounty) amount),
+                        contributors-count: (+ (get contributors-count bounty) u1),
+                    })
+                )
+                (match (map-get? bounty-contributions {
+                    report-id: report-id,
+                    contributor: tx-sender,
+                })
+                    existing-contribution
+                    (map-set bounty-contributions {
+                        report-id: report-id,
+                        contributor: tx-sender,
+                    } { amount: (+ (get amount existing-contribution) amount) })
+                    (map-set bounty-contributions {
+                        report-id: report-id,
+                        contributor: tx-sender,
+                    } { amount: amount })
+                )
+            )
+            (begin
+                (map-set report-bounties { report-id: report-id } {
+                    total-amount: amount,
+                    contributors-count: u1,
+                    claimed: false,
+                    created-at: current-time,
+                })
+                (map-set bounty-contributions {
+                    report-id: report-id,
+                    contributor: tx-sender,
+                } { amount: amount })
+            )
+        )
+        (ok true)
+    )
+)
+
+(define-public (claim-bounty (report-id uint))
+    (let (
+            (report (unwrap! (map-get? reports { report-id: report-id })
+                ERR-REPORT-NOT-FOUND
+            ))
+            (bounty (unwrap! (map-get? report-bounties { report-id: report-id })
+                ERR-REPORT-NOT-FOUND
+            ))
+            (reporter (unwrap! (get reporter report) ERR-NOT-AUTHORIZED))
+        )
+        (asserts! (is-eq tx-sender reporter) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq (get status report) "verified") ERR-INVALID-STATUS)
+        (asserts! (not (get claimed bounty)) ERR-BOUNTY-CLAIMED)
+        (try! (as-contract (stx-transfer? (get total-amount bounty) tx-sender reporter)))
+        (map-set report-bounties { report-id: report-id }
+            (merge bounty { claimed: true })
+        )
+        (ok (get total-amount bounty))
+    )
+)
+
+(define-read-only (get-bounty (report-id uint))
+    (map-get? report-bounties { report-id: report-id })
+)
+
+(define-read-only (get-contribution
+        (report-id uint)
+        (contributor principal)
+    )
+    (map-get? bounty-contributions {
+        report-id: report-id,
+        contributor: contributor,
+    })
 )
