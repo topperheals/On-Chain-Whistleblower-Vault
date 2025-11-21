@@ -82,6 +82,19 @@
     { amount: uint }
 )
 
+(define-map report-subscribers
+    {
+        report-id: uint,
+        subscriber: principal,
+    }
+    { subscribed: bool }
+)
+
+(define-map report-subscriber-count
+    { report-id: uint }
+    { count: uint }
+)
+
 (define-public (initialize-contract (admin principal))
     (begin
         (asserts! (is-eq tx-sender (var-get dao-admin)) ERR-NOT-AUTHORIZED)
@@ -204,9 +217,7 @@
             file-size: file-size,
             description: description,
         })
-        (map-set report-evidence-count { report-id: report-id }
-            { count: (+ (get count current-count) u1) }
-        )
+        (map-set report-evidence-count { report-id: report-id } { count: (+ (get count current-count) u1) })
         (var-set total-evidence evidence-id)
         (ok evidence-id)
     )
@@ -271,11 +282,12 @@
     })
 )
 
-(define-private (update-council-reputations (report-id uint) (final-decision bool))
+(define-private (update-council-reputations
+        (report-id uint)
+        (final-decision bool)
+    )
     (begin
-        (map update-member-reputation-helper
-            (var-get council-members)
-        )
+        (map update-member-reputation-helper (var-get council-members))
         (ok true)
     )
 )
@@ -286,8 +298,12 @@
                 report-id: (var-get total-reports),
                 council-member: member,
             }))
-            (current-reputation (default-to
-                { total-votes: u0, correct-votes: u0, reputation-score: u100, last-updated: u0 }
+            (current-reputation (default-to {
+                total-votes: u0,
+                correct-votes: u0,
+                reputation-score: u100,
+                last-updated: u0,
+            }
                 (map-get? member-reputation { member: member })
             ))
         )
@@ -296,7 +312,9 @@
                 (merge current-reputation {
                     total-votes: (+ (get total-votes current-reputation) u1),
                     correct-votes: (+ (get correct-votes current-reputation) u1),
-                    reputation-score: (if (< (+ (get reputation-score current-reputation) u10) u1000)
+                    reputation-score: (if (< (+ (get reputation-score current-reputation) u10)
+                            u1000
+                        )
                         (+ (get reputation-score current-reputation) u10)
                         u1000
                     ),
@@ -364,8 +382,7 @@
         (asserts! (is-eq (get status report) "pending") ERR-INVALID-STATUS)
         (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
         (match existing-bounty
-            bounty
-            (begin
+            bounty (begin
                 (map-set report-bounties { report-id: report-id }
                     (merge bounty {
                         total-amount: (+ (get total-amount bounty) amount),
@@ -376,15 +393,16 @@
                     report-id: report-id,
                     contributor: tx-sender,
                 })
-                    existing-contribution
+                    existing-contribution (map-set bounty-contributions {
+                        report-id: report-id,
+                        contributor: tx-sender,
+                    } { amount: (+ (get amount existing-contribution) amount) }
+                    )
                     (map-set bounty-contributions {
                         report-id: report-id,
                         contributor: tx-sender,
-                    } { amount: (+ (get amount existing-contribution) amount) })
-                    (map-set bounty-contributions {
-                        report-id: report-id,
-                        contributor: tx-sender,
-                    } { amount: amount })
+                    } { amount: amount }
+                    )
                 )
             )
             (begin
@@ -397,7 +415,8 @@
                 (map-set bounty-contributions {
                     report-id: report-id,
                     contributor: tx-sender,
-                } { amount: amount })
+                } { amount: amount }
+                )
             )
         )
         (ok true)
@@ -437,4 +456,92 @@
         report-id: report-id,
         contributor: contributor,
     })
+)
+
+(define-public (subscribe-report (report-id uint))
+    (let (
+            (report (unwrap! (map-get? reports { report-id: report-id })
+                ERR-REPORT-NOT-FOUND
+            ))
+            (current-count (default-to { count: u0 }
+                (map-get? report-subscriber-count { report-id: report-id })
+            ))
+        )
+        (match (map-get? report-subscribers {
+            report-id: report-id,
+            subscriber: tx-sender,
+        })
+            existing-subscriber (if (get subscribed existing-subscriber)
+                (ok true)
+                (begin
+                    (map-set report-subscribers {
+                        report-id: report-id,
+                        subscriber: tx-sender,
+                    } { subscribed: true }
+                    )
+                    (map-set report-subscriber-count { report-id: report-id } { count: (+ (get count current-count) u1) })
+                    (ok true)
+                )
+            )
+            (begin
+                (map-set report-subscribers {
+                    report-id: report-id,
+                    subscriber: tx-sender,
+                } { subscribed: true }
+                )
+                (map-set report-subscriber-count { report-id: report-id } { count: (+ (get count current-count) u1) })
+                (ok true)
+            )
+        )
+    )
+)
+
+(define-public (unsubscribe-report (report-id uint))
+    (let (
+            (report (unwrap! (map-get? reports { report-id: report-id })
+                ERR-REPORT-NOT-FOUND
+            ))
+            (current-count (default-to { count: u0 }
+                (map-get? report-subscriber-count { report-id: report-id })
+            ))
+        )
+        (match (map-get? report-subscribers {
+            report-id: report-id,
+            subscriber: tx-sender,
+        })
+            existing-subscriber (if (get subscribed existing-subscriber)
+                (begin
+                    (map-set report-subscribers {
+                        report-id: report-id,
+                        subscriber: tx-sender,
+                    } { subscribed: false }
+                    )
+                    (map-set report-subscriber-count { report-id: report-id } { count: (if (> (get count current-count) u0)
+                        (- (get count current-count) u1)
+                        u0
+                    ) }
+                    )
+                    (ok true)
+                )
+                (ok true)
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-read-only (get-subscription
+        (report-id uint)
+        (subscriber principal)
+    )
+    (map-get? report-subscribers {
+        report-id: report-id,
+        subscriber: subscriber,
+    })
+)
+
+(define-read-only (get-report-subscriber-count (report-id uint))
+    (default-to { count: u0 }
+        (map-get? report-subscriber-count { report-id: report-id })
+    )
 )
