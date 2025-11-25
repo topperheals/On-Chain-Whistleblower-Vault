@@ -7,14 +7,20 @@
 (define-constant ERR-INVALID-EVIDENCE (err u106))
 (define-constant ERR-INVALID-AMOUNT (err u107))
 (define-constant ERR-BOUNTY-CLAIMED (err u108))
+(define-constant ERR-MILESTONE-NOT-FOUND (err u109))
+(define-constant ERR-MILESTONE-COMPLETED (err u110))
+(define-constant ERR-MILESTONE-NOT-READY (err u111))
+(define-constant ERR-MILESTONE-LOCKED (err u112))
 (define-constant MINIMUM-STAKE u1000000)
 (define-constant MINIMUM-BOUNTY u100000)
+(define-constant MINIMUM-MILESTONE-REWARD u50000)
 
 (define-data-var dao-admin principal tx-sender)
 (define-data-var total-reports uint u0)
 (define-data-var council-members (list 50 principal) (list))
 (define-data-var member-to-remove principal tx-sender)
 (define-data-var total-evidence uint u0)
+(define-data-var total-milestones uint u0)
 
 (define-map reports
     { report-id: uint }
@@ -80,6 +86,31 @@
         contributor: principal,
     }
     { amount: uint }
+)
+
+(define-map report-milestones
+    { milestone-id: uint }
+    {
+        report-id: uint,
+        title: (string-ascii 100),
+        description: (string-ascii 500),
+        reward-amount: uint,
+        unlock-height: uint,
+        completed: bool,
+        completed-at: (optional uint),
+        creator: principal,
+        created-at: uint,
+    }
+)
+
+(define-map milestone-progress
+    { report-id: uint }
+    {
+        total-milestones: uint,
+        completed-milestones: uint,
+        total-rewards: uint,
+        claimed-rewards: uint,
+    }
 )
 
 (define-public (initialize-contract (admin principal))
@@ -425,6 +456,88 @@
     )
 )
 
+(define-public (create-milestone
+        (report-id uint)
+        (title (string-ascii 100))
+        (description (string-ascii 500))
+        (reward-amount uint)
+        (unlock-delay uint)
+    )
+    (let (
+            (report (unwrap! (map-get? reports { report-id: report-id })
+                ERR-REPORT-NOT-FOUND
+            ))
+            (milestone-id (+ (var-get total-milestones) u1))
+            (current-height stacks-block-height)
+            (current-progress (default-to
+                { total-milestones: u0, completed-milestones: u0, total-rewards: u0, claimed-rewards: u0 }
+                (map-get? milestone-progress { report-id: report-id })
+            ))
+        )
+        (asserts! (>= reward-amount MINIMUM-MILESTONE-REWARD) ERR-INVALID-AMOUNT)
+        (asserts! (> unlock-delay u0) ERR-INVALID-AMOUNT)
+        (asserts! (> (len title) u0) ERR-INVALID-EVIDENCE)
+        (try! (stx-transfer? reward-amount tx-sender (as-contract tx-sender)))
+        (map-set report-milestones { milestone-id: milestone-id } {
+            report-id: report-id,
+            title: title,
+            description: description,
+            reward-amount: reward-amount,
+            unlock-height: (+ current-height unlock-delay),
+            completed: false,
+            completed-at: none,
+            creator: tx-sender,
+            created-at: current-height,
+        })
+        (map-set milestone-progress { report-id: report-id } {
+            total-milestones: (+ (get total-milestones current-progress) u1),
+            completed-milestones: (get completed-milestones current-progress),
+            total-rewards: (+ (get total-rewards current-progress) reward-amount),
+            claimed-rewards: (get claimed-rewards current-progress),
+        })
+        (var-set total-milestones milestone-id)
+        (ok milestone-id)
+    )
+)
+
+(define-public (complete-milestone (milestone-id uint))
+    (let (
+            (milestone (unwrap! (map-get? report-milestones { milestone-id: milestone-id })
+                ERR-MILESTONE-NOT-FOUND
+            ))
+            (report (unwrap! (map-get? reports { report-id: (get report-id milestone) })
+                ERR-REPORT-NOT-FOUND
+            ))
+            (reporter (unwrap! (get reporter report) ERR-NOT-AUTHORIZED))
+            (current-height stacks-block-height)
+            (current-progress (unwrap! (map-get? milestone-progress { report-id: (get report-id milestone) })
+                ERR-MILESTONE-NOT-FOUND
+            ))
+        )
+        (asserts! (is-eq tx-sender reporter) ERR-NOT-AUTHORIZED)
+        (asserts! (not (get completed milestone)) ERR-MILESTONE-COMPLETED)
+        (asserts! (>= current-height (get unlock-height milestone)) ERR-MILESTONE-LOCKED)
+        (asserts! (or
+            (is-eq (get status report) "pending")
+            (is-eq (get status report) "verified")
+        ) ERR-INVALID-STATUS)
+        (try! (as-contract (stx-transfer? (get reward-amount milestone) tx-sender reporter)))
+        (map-set report-milestones { milestone-id: milestone-id }
+            (merge milestone {
+                completed: true,
+                completed-at: (some current-height),
+            })
+        )
+        (map-set milestone-progress { report-id: (get report-id milestone) } {
+            total-milestones: (get total-milestones current-progress),
+            completed-milestones: (+ (get completed-milestones current-progress) u1),
+            total-rewards: (get total-rewards current-progress),
+            claimed-rewards: (+ (get claimed-rewards current-progress) (get reward-amount milestone)),
+        })
+        (ok (get reward-amount milestone))
+    )
+)
+
 (define-read-only (get-bounty (report-id uint))
     (map-get? report-bounties { report-id: report-id })
 )
@@ -437,4 +550,23 @@
         report-id: report-id,
         contributor: contributor,
     })
+)
+
+(define-read-only (get-milestone (milestone-id uint))
+    (map-get? report-milestones { milestone-id: milestone-id })
+)
+
+(define-read-only (get-milestone-progress (report-id uint))
+    (map-get? milestone-progress { report-id: report-id })
+)
+
+(define-read-only (get-total-milestones)
+    (var-get total-milestones)
+)
+
+(define-read-only (is-milestone-unlocked (milestone-id uint))
+    (match (map-get? report-milestones { milestone-id: milestone-id })
+        milestone (>= stacks-block-height (get unlock-height milestone))
+        false
+    )
 )
